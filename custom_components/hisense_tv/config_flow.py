@@ -1,4 +1,5 @@
 """Hisense TV config flow."""
+import asyncio
 import json
 from json.decoder import JSONDecodeError
 import logging
@@ -60,7 +61,7 @@ class HisenseTvFlow(config_entries.ConfigFlow, domain=DOMAIN):
             payload = json.loads(message.payload)
         except JSONDecodeError:
             payload = {}
-        _LOGGER.debug("_async_authcode_respone %s", payload)
+        _LOGGER.debug("_async_authcode_response %s", payload)
         self.task_auth = payload.get("result") == 1
         self.hass.async_create_task(
             self.hass.config_entries.flow.async_configure(flow_id=self.flow_id)
@@ -109,41 +110,43 @@ class HisenseTvFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_MQTT_OUT: user_input.get(CONF_MQTT_OUT),
         }
 
-        await self._check_authentication(client_id=DEFAULT_CLIENT_ID)
-
+        task = asyncio.create_task(self._check_authentication(client_id=DEFAULT_CLIENT_ID))
         return self.async_show_progress(
             step_id="user",
             progress_action="progress_action",
-            progress_task="auth_check",
+            progress_task=task,
         )
 
     async def _check_authentication(self, client_id):
         self._unsubscribe_auth = await mqtt.async_subscribe(
             hass=self.hass,
-            topic="%s/remoteapp/mobile/%s/ui_service/data/authentication"
-            % (self.task_mqtt.get(CONF_MQTT_IN), client_id),
+            topic=f"{self.task_mqtt.get(CONF_MQTT_IN)}/remoteapp/mobile/{client_id}/ui_service/data/authentication",
             msg_callback=self._async_pin_needed,
         )
         self._unsubscribe_sourcelist = await mqtt.async_subscribe(
             hass=self.hass,
-            topic="%s/remoteapp/mobile/%s/ui_service/data/sourcelist"
-            % (self.task_mqtt.get(CONF_MQTT_IN), client_id),
+            topic=f"{self.task_mqtt.get(CONF_MQTT_IN)}/remoteapp/mobile/{client_id}/ui_service/data/sourcelist",
             msg_callback=self._async_pin_not_needed,
         )
         _LOGGER.debug("_check_authentication - publish gettvstate")
         mqtt.publish(
             hass=self.hass,
-            topic="%s/remoteapp/tv/ui_service/%s/actions/gettvstate"
-            % (self.task_mqtt.get(CONF_MQTT_OUT), client_id),
+            topic=f"{self.task_mqtt.get(CONF_MQTT_OUT)}/remoteapp/tv/ui_service/{client_id}/actions/gettvstate",
             payload="",
         )
         _LOGGER.debug("_check_authentication - publish sourcelist")
         mqtt.publish(
             hass=self.hass,
-            topic="%s/remoteapp/tv/ui_service/%s/actions/sourcelist"
-            % (self.task_mqtt.get(CONF_MQTT_OUT), client_id),
+            topic=f"{self.task_mqtt.get(CONF_MQTT_OUT)}/remoteapp/tv/ui_service/{client_id}/actions/sourcelist",
             payload="",
         )
+        await self._wait_for_auth_result()
+
+    async def _wait_for_auth_result(self):
+        """Wait until self.task_auth is no longer None."""
+        _LOGGER.debug("Waiting for auth result...")
+        while self.task_auth is None:
+            await asyncio.sleep(0.1)
 
     async def async_step_reauth(self, user_input=None):
         """Reauth handler."""
@@ -158,7 +161,7 @@ class HisenseTvFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_progress_done(next_step_id="finish")
 
         if self.task_auth is False:
-            _LOGGER.debug("async_step_auth - task_auth is False ->  reauth")
+            _LOGGER.debug("async_step_auth - task_auth is False -> reauth")
             return self.async_show_progress_done(next_step_id="reauth")
 
         if user_input is None:
@@ -177,21 +180,20 @@ class HisenseTvFlow(config_entries.ConfigFlow, domain=DOMAIN):
             client_id = DEFAULT_CLIENT_ID
             self._unsubscribe_auth = await mqtt.async_subscribe(
                 hass=self.hass,
-                topic="%s/remoteapp/mobile/%s/ui_service/data/authenticationcode"
-                % (self.task_mqtt.get(CONF_MQTT_IN), client_id),
+                topic=f"{self.task_mqtt.get(CONF_MQTT_IN)}/remoteapp/mobile/{client_id}/ui_service/data/authenticationcode",
                 msg_callback=self._async_authcode_response,
             )
             payload = json.dumps({"authNum": user_input.get(CONF_PIN)})
             mqtt.publish(
                 hass=self.hass,
-                topic="%s/remoteapp/tv/ui_service/%s/actions/authenticationcode"
-                % (self.task_mqtt.get(CONF_MQTT_OUT), client_id),
+                topic=f"{self.task_mqtt.get(CONF_MQTT_OUT)}/remoteapp/tv/ui_service/{client_id}/actions/authenticationcode",
                 payload=payload,
             )
+            task = asyncio.create_task(self._wait_for_auth_result())
             return self.async_show_progress(
                 step_id="auth",
                 progress_action="progress_action",
-                progress_task="auth_code",
+                progress_task=task,
             )
 
     async def async_step_finish(self, user_input=None):
